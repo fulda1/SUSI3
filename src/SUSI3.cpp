@@ -11,29 +11,32 @@
 
 */
 
-#include "SUSI2.h"                                                                                 // Header
+#include "SUSI3.h"                                                                                 // Header
 
 #ifdef  TIM_MODULE_ENABLED
 #include <HardwareTimer.h>                                                    // Include HardwareTimer for compatibility
 HardwareTimer myTimer(TIM1);                                                  // define object, to present we occupy Timer 1
 #endif
 
-SUSI2* pointerToSUSI;                                                         // Pointer to the SUSI Class
+SUSI3* pointerToSUSI;                                                         // Pointer to the SUSI Class
 PacketT partial;                                                              // partially received packet - used in ISR routine
 uint8_t ByteCount;                                                            // Counter of bytes in packet - used in ISR routine
+uint32_t SUSI_Tx_Buffer;                                                      // BiDi transmitt buffer -> 2x 16 bit command
 
 /**********************************************************************************************************************/
 /* Constructor and Destructor */
 
-SUSI2::SUSI2() {                                                                                    // Class constructor
+SUSI3::SUSI3() {                                                                                    // Class constructor
+  Status0 = 3;        // Status byte 0 -> Bit 0 = 1: Motor control enabled (sound upgrade completed) Bit 1 = 1: Light function enabled (e.g., generator sound for steam locomotive running) Bit 4 = 0: Boiler fire simulation off
+  Status1 = 0;        // Status byte 1 -> Bit 0 = 1: Another vehicle is coupled to the front. Bit 1 = 1: Another vehicle is coupled to the rear.
 }                                                                                                       // empty for now
 
-SUSI2::SUSI2(uint8_t CLK_pin, uint8_t DATA_pin) {                                                       // Class constructor
+SUSI3::SUSI3(uint8_t CLK_pin, uint8_t DATA_pin) {                                                       // Class constructor
   (void)(CLK_pin);                                                                                      // Have no usage for parameter "CLK_pin", will mark it as "unused"
   (void)(DATA_pin);                                                                                     // Have no usage for parameter "DATA_pin", will mark it as "unused"
 }                                                                                                       // This one is for compatibility only. Pin assignment is fixed for the hardware
 
-SUSI2::~SUSI2(void) {                                                                                   // Class Destructor
+SUSI3::~SUSI3(void) {                                                                                   // Class Destructor
   SPI_Cmd( SPI1, DISABLE );                                                                             // stop SPI receiver
   TIM_Cmd( TIM1, DISABLE );                                                                             // stop Timer1 functions
 }
@@ -41,7 +44,7 @@ SUSI2::~SUSI2(void) {                                                           
 /**********************************************************************************************************************/
 /* Initializing Library */
 
-void SUSI2::initClass(void) {
+void SUSI3::initClass(void) {
   pointerToSUSI = this;                                                                             // I assign the pointer the address of the following class
 
   for (BufferR=0; BufferR<BUFFER_SIZE; BufferR++) {MyBuffer[BufferR].W = 0;};    // empty buffer
@@ -52,7 +55,7 @@ void SUSI2::initClass(void) {
   initTimer1();         // initialize Timer1 for synchronization
 }
 
-void SUSI2::init(void) {
+void SUSI3::init(void) {
     if (notifySusiCVRead) {                                                                             // If CV storage system is present
         _slaveAddress = notifySusiCVRead(ADDRESS_CV,0);                                                   // I read the value stored in the CV of the address
 
@@ -70,7 +73,7 @@ void SUSI2::init(void) {
     initClass();                                                                                        // I initialize the class and its components
 }
 
-void SUSI2::init(uint8_t SlaveAddress) {                                                                // Initialization with user-chosen address in code
+void SUSI3::init(uint8_t SlaveAddress) {                                                                // Initialization with user-chosen address in code
     _slaveAddress = SlaveAddress;                                                                       // Except the address
 
     if ((_slaveAddress > MAX_ADDRESS_VALUE) || (_slaveAddress < 1)) {                                   // If the address is greater than those allowed
@@ -84,7 +87,7 @@ void SUSI2::init(uint8_t SlaveAddress) {                                        
 /* Interrupts */
 /* interrupts are not member of class, they are linked as static */
 
-void SUSI2::AddToQueue(PacketT ReceivedData) {
+void SUSI3::AddToQueue(PacketT ReceivedData) {
   if (!MyBuffer[BufferW].B.used)                       // is buffer available?
   {
     MyBuffer[BufferW++] = ReceivedData;                     // yes, store data
@@ -108,10 +111,13 @@ void SPI1_IRQHandler(void)
   switch (ByteCount) {
     case 0 :
       partial.B.cmnd = SPI_I2S_ReceiveData( SPI1 );            // read data to command
+        SPI_I2S_SendData(SPI1, partial.B.cmnd);
       ByteCount++;
       break;
     case 1 :
       partial.B.arg1 = SPI_I2S_ReceiveData( SPI1 );            // read data to arg1
+        SPI_I2S_SendData(SPI1, partial.B.arg1);
+
       if ( (partial.B.cmnd & 0xF0) == 0x70 )                   // is it 3 byte command? (CV manipulation)
         {ByteCount++;}                                         // yes, then read next byte
       else
@@ -171,10 +177,11 @@ void TIM1_UP_IRQHandler(void)
 }                                                   // end of extern
 #endif
 
+
 /**********************************************************************************************************************/
 /* Hardware inits */
 
-void SUSI2::initSPI() {
+void SUSI3::initSPI() {
   /*
   R16_SPI_CTLR1             // 0x40013000 SPI Control register1
 
@@ -224,13 +231,21 @@ SPI1->CTLR1 |= CTLR1_SPE_Set;
  */
 
     SPI_InitTypeDef SPI_InitStructure={0};
+    GPIO_InitTypeDef GPIO_InitStructure={0};
 
-    RCC_APB2PeriphClockCmd(  RCC_APB2Periph_SPI1, ENABLE ); // do not forget clock
+
+    RCC_APB2PeriphClockCmd(  RCC_APB2Periph_GPIOC | RCC_APB2Periph_SPI1, ENABLE ); // do not forget clock
 
     pinMode(SPI_SCK,INPUT); // SUSI data
     pinMode(SPI_MOSI,INPUT); // SUSI clock
     //pinMode(SPI_MISO,GPIO_Mode_AF_PP);    // not used
+    //pinMode(SPI_MISO,OUTPUT);    // not used
+    //pin_function(SPI_MISO, CH_PIN_DATA(CH_MODE_OUTPUT_50MHz, CH_CNF_OUTPUT_AFPP, 0, 0));
     //pinMode(SPI_CS,INPUT);     // not used
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_7;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init( GPIOC, &GPIO_InitStructure );
 
 
 
@@ -238,14 +253,16 @@ SPI1->CTLR1 |= CTLR1_SPE_Set;
 
 // SPI parameters to fit SUSI requirements
     SPI_InitStructure.SPI_Direction = SPI_Direction_2Lines_RxOnly;
+    // SPI_InitStructure.SPI_Direction = SPI_Direction_2Lines_FullDuplex; <-- this mode does not work at all
+
     SPI_InitStructure.SPI_Mode = SPI_Mode_Slave;
     SPI_InitStructure.SPI_DataSize = SPI_DataSize_8b;
     SPI_InitStructure.SPI_CPOL = SPI_CPOL_Low;
     SPI_InitStructure.SPI_CPHA = SPI_CPHA_2Edge;
     SPI_InitStructure.SPI_NSS = SPI_NSS_Soft;
-    SPI_InitStructure.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_256;
+    SPI_InitStructure.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_2;
     SPI_InitStructure.SPI_FirstBit = SPI_FirstBit_LSB;
-    SPI_InitStructure.SPI_CRCPolynomial = 7;
+    //SPI_InitStructure.SPI_CRCPolynomial = 7;
     SPI_Init( SPI1, &SPI_InitStructure );
 
 // Enable interrupt on interrupt controller
@@ -257,11 +274,9 @@ SPI1->CTLR1 |= CTLR1_SPE_Set;
 // Enable SPI
     SPI_Cmd( SPI1, ENABLE );
 
-
-  //SPI_CTLR1 = 0x06C1;
 }
 
-void SUSI2::initTimer1() {     // Timer 1 in "slave" mode.
+void SUSI3::initTimer1() {     // Timer 1 in "slave" mode.
 
     // the trick is, that timer receive "reset" every falling edge of ETR pin, and ETR pin is shared with SUSI clock.
     // it mean, timer count 7 miliseconds from last click. After this it reset receiver.
@@ -330,7 +345,7 @@ void SUSI2::initTimer1() {     // Timer 1 in "slave" mode.
 
 /**********************************************************************************************************************/
 /* ACK pulse as hardware */
-void SUSI2::SendACK() {
+void SUSI3::SendACK() {
   pinMode(SPI_MOSI,OUTPUT_OD);  // change pin to output, with open drain
   digitalWrite(SPI_MOSI, LOW);  // set it to low
   //delay(2);                     // ch32 does not look for "half" milisecond, so delay(2) mean more than 1, less than 2
@@ -339,11 +354,47 @@ void SUSI2::SendACK() {
   
 }
 
+void SUSI3::SendBiDi() {
+  digitalWrite(SPI_MOSI, HIGH);   // output to high
+  pinMode(SPI_MOSI,OUTPUT_OD);    // change pin to output, with open drain
+  for (int i = 0; i < 32; i++) {
+    do {
+      yield();
+    } while (digitalRead(SPI_SCK) == LOW); // wait to end of last bit
+    ((SUSI_Tx_Buffer & 1) ? digitalWrite(SPI_MOSI, HIGH) : digitalWrite(SPI_MOSI, LOW));  // send 1 bit
+    SUSI_Tx_Buffer = SUSI_Tx_Buffer >> 1;                                                 // roll to next bit
+    do {
+      yield();
+    } while (digitalRead(SPI_SCK) == HIGH); // wait to end of last bit
+  }
+  delayMicroseconds(10);        // at minimum 10 micro sec after last bit, hmm start function take about 15 micro sec.
+  pinMode(SPI_MOSI,INPUT);      // change pin back to input
+}
+
+        /*
+        *   PushMsg() Add one message + parameter to transmitt queue
+        *   Input:
+        *       - Command to add to queue
+        *       - Parameter to add to queue
+        *   Returns:
+        *       - None
+        */
+void SUSI3::PushMsg(uint8_t command, uint8_t data)
+{
+  if (TxBufLen == 1) {
+    SUSI_Tx_Buffer |= ((uint32_t)command << 16)  | ((uint32_t)data << 24);
+    TxBufLen++ ;
+  }
+  if (TxBufLen == 0) {
+    SUSI_Tx_Buffer = (uint32_t)command  | ((uint32_t)data << 8);
+    TxBufLen++ ;
+  }
+}
 
 /**********************************************************************************************************************/
 /* Message processor */
 
-int8_t SUSI2::process(void) {
+int8_t SUSI3::process(void) {
   int8_t ResponseStatus = 0;
   if (MyBuffer[BufferR].B.used) {ResponseStatus = 1;}        // at minimum one in queue
   while (MyBuffer[BufferR].B.used)                           // are data in buffer available?
@@ -365,6 +416,7 @@ int8_t SUSI2::process(void) {
         notifySusiRawMessage3b(MyBuffer[BufferR].B.cmnd, MyBuffer[BufferR].B.arg1, MyBuffer[BufferR].B.arg2);
     }
 
+  		  //SPI_I2S_SendData(SPI1, MyBuffer[BufferR].B.cmnd);
     switch (MyBuffer[BufferR].B.cmnd) {
       case 0x60:
         /*Function group 1 : 0110-0000 (0x60 = 96) 0 0 0 F0 - F4 F3 F2 F1*/
@@ -803,6 +855,57 @@ int8_t SUSI2::process(void) {
           }
         }
         break;
+      case 0x01:
+        /*Bidi Modules call : 0000-0001 (0x01 = 1) R7 R6 R5 S4 - S3 F2 M1 M0 
+           host generic pooling. 
+            Bit 0-1: Modules number - 01 = 1, 10 = 2, 11 = 3
+            Bit 2: forced answer - With Bit 2 = 1, the Modules must answer with a status 0x8A. 
+            Bit 3-4: status address - Selection of one of the four different status bytes (0x8A).  
+            Bit 5-7: Reserved*/
+        if ((MyBuffer[BufferR].B.arg1 & 0x03) == _slaveAddress) {   // message for me?
+          TxBufLen = 0;
+          if (MyBuffer[BufferR].B.arg1 & 0x04) {
+            switch (MyBuffer[BufferR].B.arg1 & 0x18) {
+              case 0x00:
+                PushMsg(SUSI_MSG_STATUS_BYTE,Status0);    // forced to sent status 0
+                break;
+              case 0x08:
+                PushMsg(SUSI_MSG_STATUS_BYTE,Status1);    // forced to sent status 1
+                break;
+              case 0x10:
+              case 0x18:
+                PushMsg(SUSI_MSG_FUNCTION_DIRECTLY,0x00); // forced to sent "reserved" status
+                break;
+            }
+            if (notifyBidiModulesCall) {
+              notifyBidiModulesCall(1);                   // one message is forced, one remain
+            }
+          } else {
+            if (notifyBidiModulesCall) {
+              notifyBidiModulesCall(2);                   // not forced, can reply any message
+            }
+            if (TxBufLen == 0) PushMsg(SUSI_MSG_FUNCTION_DIRECTLY,0x00);  // buffer is empty, push one empty message
+          }
+          if (TxBufLen == 1) PushMsg(SUSI_MSG_FUNCTION_DIRECTLY,0x00);    // only one massage, add 2nd (empty)
+          SendACK();                                    // ready to send data
+          SendBiDi();
+          }
+        break;
+      case SUSI_MSG_SINGLE_STATE:
+      case SUSI_MSG_FUNCTION_DIRECTLY:
+      case SUSI_MSG_FUNCTION_VALUE:
+      case SUSI_MSG_SHORT_BINARY_STATE:
+      case SUSI_MSG_AUTOMATIC_SPEED:
+      case SUSI_MSG_AUTOMATIC_OPERATION:
+      case SUSI_MSG_POSITION_ADDRESS_HIGH:
+      case SUSI_MSG_POSITION_ADDRESS_LOW:
+      case SUSI_MSG_STATUS_BYTE:
+      case SUSI_MSG_ANALOG_VALUES_A:
+      case SUSI_MSG_ANALOG_VALUES_B:
+      case SUSI_MSG_CV_ERROR_RESPONSE:
+      case SUSI_MSG_CV_VALUE_RESPONSE:
+        // BiDi responses, nothing to done here ...
+        break;
       default:
         ResponseStatus = -1;
         if (notifySusiUnknownMessage) {                                                                     // If there is a notify about unknowns
@@ -863,7 +966,7 @@ reserved                    |         1024           |
 /**********************************************************************************************************************/
 /* CV validation */
 
-bool SUSI2::IsValidCV(uint8_t CV_Value) {
+bool SUSI3::IsValidCV(uint8_t CV_Value) {
   CV_Value ^= 0x80;                       // for standard usage upper bit must be 1, but is not practical to use.
   /*  Special cases are solved before, it make no sense to solve them here.
   if (CV_Value & 0x80) {return false;}    // only values up to 127 are allowed for new implementations
